@@ -1,3 +1,4 @@
+
 # ============================================================
 #
 # SCRIPT: ARGOS_CLEANING_AND_MAPPING.R
@@ -107,7 +108,7 @@
 ##
 ## ============================================================
 
-## ===== PACKAGES =====
+## 0) PACKAGES ----
 suppressPackageStartupMessages({
   library(dplyr)
   library(lubridate)
@@ -120,20 +121,19 @@ suppressPackageStartupMessages({
   library(scales)
 })
 
-## ===== SOURCE DONNÉES (URL) =====
-csv_url <- "https://raw.githubusercontent.com/biosphere-environnement/timilla-project/main/argos_data_turtledove_morocco_2025.csv"
+## 1) PARAMÈTRES ----
+csv_url       <- "https://raw.githubusercontent.com/biosphere-environnement/timilla-project/main/argos_data_turtledove_morocco_2025.csv"
 
-## ===== PARAMÈTRES =====
-ellipse_max_km <- 6      # seuil demi-grand axe pour LC faibles (0/A/B/C)
-gap_dt_h    <- 12        # rupture visuelle si Δt > 12 h
-gap_dist_km <- 150       # rupture visuelle si saut > 150 km
+ellipse_max_km <- 6      # seuil demi-grand axe (km) pour garder 0/A/B/C
+gap_dt_h       <- 12     # rupture visuelle si Δt > 12 h
+gap_dist_km    <- 150    # rupture visuelle si saut > 150 km
 
-# Classes & ordre de qualité
+# Classes ARGOS considérées et ordre de qualité
 lc_keep  <- c("1","2","3","0","A","B","C")
 lc_order <- c("3","2","1","0","A","B","C")
 lc_rank  <- setNames(seq_along(lc_order), lc_order)
 
-# Étiquettes balises
+# Noms “humains” pour les 4 balises
 balise_labels <- c(
   "283694" = "283694 (NAJAT)",
   "283695" = "283695 (INES)",
@@ -141,7 +141,7 @@ balise_labels <- c(
   "283697" = "283697 (BENOIT)"
 )
 
-## ===== HELPERS =====
+## 2) FONCTIONS UTILITAIRES ----
 to_num  <- function(x) suppressWarnings(as.numeric(gsub(",", ".", as.character(x))))
 to_time <- function(x) suppressWarnings(as.POSIXct(
   as.character(x), tz = "UTC",
@@ -149,86 +149,118 @@ to_time <- function(x) suppressWarnings(as.POSIXct(
                  "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"))
 )
 
-## ===== PARSE =====
-stopifnot(all(c("N° ID","Loc idx","Date de loc.","Longitude","Latitude",
-                "Qualité loc.","Demi-grand axe") %in% names(raw)))
+## 3) LECTURE DU CSV (séparateur ;) ----
+raw <- read.csv(
+  csv_url,
+  sep = ";",
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+# Vérif colonnes minimales (exactement les libellés ARGOS FR)
+required <- c("N° ID","Loc idx","Date de loc.","Longitude","Latitude",
+              "Qualité loc.","Demi-grand axe")
+if (!all(required %in% names(raw))) {
+  stop("Colonnes requises manquantes. Trouvées :\n",
+       paste(names(raw), collapse = " | "))
+}
+
 has_date_msg <- "Date Msg" %in% names(raw)
 
+## 4) PRÉPARATION DES VARIABLES (simple & lisible) ----
+# 4.1 Détection unité du demi-grand axe et conversion en km
 smaj_raw <- to_num(raw[["Demi-grand axe"]])
-# Heuristique d’unité: si médiane > 50 ⇒ suppose mètres ⇒ convertit en km
 smaj_km  <- if (isTRUE(stats::median(smaj_raw, na.rm = TRUE) > 50)) smaj_raw/1000 else smaj_raw
 
-d <- dplyr::tibble(
-  id        = as.character(raw[["N° ID"]]),
-  loc_idx   = suppressWarnings(as.integer(to_num(raw[["Loc idx"]]))),  # peut être NA
-  date_loc  = to_time(raw[["Date de loc."]]),
-  lon       = to_num(raw[["Longitude"]]),
-  lat       = to_num(raw[["Latitude"]]),
-  lc        = toupper(trimws(as.character(raw[["Qualité loc."]]))),
-  smaj_km   = smaj_km,
-  date_msg  = if (has_date_msg) to_time(raw[["Date Msg"]]) else as.POSIXct(NA, tz="UTC")
-) %>%
-  dplyr::filter(!is.na(id), !is.na(date_loc), is.finite(lon), is.finite(lat)) %>%
-  dplyr::filter(id %in% names(balise_labels)) %>%     # garder seulement nos 4 balises
-  dplyr::filter(lc %in% lc_keep) %>%
-  dplyr::mutate(
-    lc_rank    = lc_rank[lc],
-    date_loc_s = lubridate::floor_date(date_loc, "1 second")  # regroupe à la seconde
-  ) %>%
-  dplyr::arrange(id, date_loc_s, loc_idx)
+# 4.2 Construction du data.frame de travail (typé)
+d <- tibble(
+  id       = as.character(raw[["N° ID"]]),
+  loc_idx  = suppressWarnings(as.integer(to_num(raw[["Loc idx"]]))),   # peut être NA
+  date_loc = to_time(raw[["Date de loc."]]),
+  lon      = to_num(raw[["Longitude"]]),
+  lat      = to_num(raw[["Latitude"]]),
+  lc       = toupper(trimws(as.character(raw[["Qualité loc."]]))),
+  smaj_km  = smaj_km
+)
 
-## ===== DÉDOUBLONNAGE (id, date arrondie, loc_idx) =====
-# Règle: meilleure LC (3>2>1>0>A>B>C) -> ellipse plus petite (NA en dernier) -> dernier message
+# 4.3 Ajout date_msg si dispo (facultatif mais utile pour départager)
+if (has_date_msg) {
+  d$date_msg <- to_time(raw[["Date Msg"]])
+} else {
+  d$date_msg <- as.POSIXct(NA, tz="UTC")
+}
+
+# 4.4 Filtres de base & colonnes auxiliaires
+d <- d %>%
+  filter(!is.na(id), !is.na(date_loc), is.finite(lon), is.finite(lat)) %>%
+  filter(id %in% names(balise_labels)) %>%     # ne garder que les 4 balises du projet
+  filter(lc %in% lc_keep) %>%
+  mutate(
+    lc_rank    = lc_rank[lc],
+    date_loc_s = floor_date(date_loc, "1 second")  # arrondi à la seconde
+  ) %>%
+  arrange(id, date_loc_s, loc_idx)
+
+## 5) DÉDOUBLONNAGE (id, date_loc_s, loc_idx) ----
+# Règle de tri décroissante :
+#  (1) meilleure LC (3>2>1>0>A>B>C)
+#  (2) ellipse plus petite (NA en dernier)
+#  (3) dernier message (Date Msg si présent, sinon Date de loc.)
 d1 <- d %>%
-  dplyr::mutate(loc_idx_chr = ifelse(is.na(loc_idx), "__NA__", as.character(loc_idx))) %>%
-  dplyr::group_by(id, date_loc_s, loc_idx_chr) %>%
-  dplyr::arrange(
+  mutate(loc_idx_chr = ifelse(is.na(loc_idx), "__NA__", as.character(loc_idx))) %>%
+  group_by(id, date_loc_s, loc_idx_chr) %>%
+  arrange(
     lc_rank,
     is.na(smaj_km), smaj_km,
-    dplyr::desc(dplyr::coalesce(date_msg, date_loc)),
+    dplyr::desc(coalesce(date_msg, date_loc)),
     .by_group = TRUE
   ) %>%
-  dplyr::slice(1) %>%
-  dplyr::ungroup() %>%
-  dplyr::select(-lc_rank, -loc_idx_chr) %>%
-  dplyr::arrange(id, date_loc)
+  slice(1) %>%
+  ungroup() %>%
+  select(-lc_rank, -loc_idx_chr) %>%
+  arrange(id, date_loc)
 
-## ===== FILTRE QUALITÉ =====
-# LC 1/2/3 gardées d’office. LC 0/A/B/C gardées si smaj_km ≤ ellipse_max_km.
+## 6) FILTRE QUALITÉ (ellipse + LC) ----
 d_final <- d1 %>%
-  dplyr::filter(
+  filter(
     lc %in% c("1","2","3") |
       (lc %in% c("0","A","B","C") & is.finite(smaj_km) & smaj_km <= ellipse_max_km)
   )
 
-## ===== Comptes LC (pour labels n=) =====
-lc_show <- c("1","2","3","0","A","B","C")
+## 7) COMPTES LC (pour la légende) ----
+lc_show <- c("1","2","3","0","A","B","C")      # ordre global
 d_final$lc <- factor(d_final$lc, levels = lc_show)
+
 tab_lc <- as.data.frame(table(factor(d_final$lc, levels = lc_show)))
 tab_lc <- tab_lc[tab_lc$Freq > 0, ]
 lab_lc <- setNames(paste0(tab_lc$Var1, " (n=", tab_lc$Freq, ")"), tab_lc$Var1)
-# Ordre d’affichage : 1,2,3 puis 0,A,B (C n’est pas affichée)
+
+# On n’affiche que 1,2,3 puis 0,A,B (C retirée de la légende)
 lc_breaks <- c("1","2","3","0","A","B")
 lc_breaks <- lc_breaks[lc_breaks %in% names(lab_lc)]
 
-## ===== RUPTURES VISUELLES (carte) =====
+## 8) RUPTURES VISUELLES (pour la carte uniquement) ----
 d_plot <- d_final %>%
-  dplyr::group_by(id) %>%
-  dplyr::arrange(date_loc, .by_group = TRUE) %>%
-  dplyr::mutate(
-    dt_h    = as.numeric(difftime(date_loc, dplyr::lag(date_loc), units = "hours")),
-    dist_km = geosphere::distHaversine(cbind(lon,lat),
-                                       cbind(dplyr::lag(lon), dplyr::lag(lat)))/1000,
+  group_by(id) %>%
+  arrange(date_loc, .by_group = TRUE) %>%
+  mutate(
+    dt_h = as.numeric(difftime(date_loc, lag(date_loc), units = "hours")),
+    ok   = is.finite(lon) & is.finite(lat) & is.finite(lag(lon)) & is.finite(lag(lat)),
+    dist_km = ifelse(ok,
+                     geosphere::distHaversine(cbind(lon, lat), cbind(lag(lon), lag(lat)))/1000,
+                     NA_real_),
     is_break = is.na(dt_h) | dt_h > gap_dt_h | dist_km > gap_dist_km,
     seg_id   = cumsum(replace(is_break, is.na(is_break), FALSE))
-  ) %>% dplyr::ungroup()
+  ) %>% ungroup() %>% select(-ok)
 
-traj_gap  <- d_plot %>% dplyr::group_by(id) %>% dplyr::arrange(date_loc, .by_group = TRUE) %>%
-  dplyr::mutate(lon_lag = dplyr::lag(lon), lat_lag = dplyr::lag(lat)) %>% dplyr::ungroup() %>%
-  dplyr::filter(is_break & is.finite(lon_lag) & is.finite(lat_lag))
-traj_cont <- d_plot %>% dplyr::filter(!is_break)
+traj_gap <- d_plot %>% group_by(id) %>% arrange(date_loc, .by_group = TRUE) %>%
+  mutate(lon_lag = lag(lon), lat_lag = lag(lat)) %>% ungroup() %>%
+  filter(is_break & is.finite(lon_lag) & is.finite(lat_lag))
 
-## ===== FOND CARTO =====
+traj_cont <- d_plot %>% filter(!is_break)
+
+## 9) FOND CARTOGRAPHIQUE ----
 world <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf")
 maroc_claimed <- world %>%
   dplyr::filter(admin %in% c("Morocco","Western Sahara")) %>%
@@ -239,17 +271,18 @@ world_custom <- world %>%
   dplyr::bind_rows(maroc_claimed)
 coast <- rnaturalearth::ne_coastline(scale = "medium", returnclass = "sf")
 
+# Cadre automatique (avec petite marge)
 xpad <- max(diff(range(d_plot$lon, na.rm = TRUE))*0.06, 0.3)
 ypad <- max(diff(range(d_plot$lat, na.rm = TRUE))*0.06, 0.3)
 xlim_vals <- range(d_plot$lon, na.rm = TRUE) + c(-xpad, xpad)
 ylim_vals <- range(d_plot$lat, na.rm = TRUE) + c(-ypad, ypad)
 
-## ===== COULEURS & LABELS BALISES =====
+## 10) COULEURS & LABELS BALISES ----
 pal_id <- scales::hue_pal()(length(unique(d_plot$id)))
 names(pal_id) <- sort(unique(d_plot$id))
 balise_labels_present <- balise_labels[names(pal_id)]
 
-## ===== CARTE =====
+## 11) CARTE ----
 p <- ggplot() +
   geom_sf(data = world_custom, fill = "grey95", color = "grey70", linewidth = 0.2) +
   geom_sf(data = coast, color = "grey60", linewidth = 0.2) +
@@ -263,7 +296,7 @@ p <- ggplot() +
              aes(lon, lat, colour = id, shape = lc), size = 2.2, stroke = 0.2) +
   coord_sf(xlim = xlim_vals, ylim = ylim_vals, expand = FALSE) +
 
-  # Légende balises (sans titre), sur 2 lignes
+  # Légende 1 (balises) — sans titre, sur 2 lignes
   scale_colour_manual(
     name   = NULL,
     values = pal_id,
@@ -271,45 +304,39 @@ p <- ggplot() +
     guide  = guide_legend(nrow = 2, byrow = TRUE, order = 1)
   ) +
 
-  # Légende LC : titre forcé seul sur une ligne puis 2 lignes de symboles
+  # Légende 2 (LC) — titre sur sa propre ligne, 2 lignes de symboles
   scale_shape_manual(
-    name   = "Classes de localisation\n\u2009",  # \n + hair-space = titre seul sur sa ligne
-    values = c("1"=16, "2"=17, "3"=15, "0"=3, "A"=8, "B"=13),
+    name   = "Classes de localisation\n",
+    values = c("1"=16, "2"=17, "3"=15, "0"=3, "A"=8, "B"=13, "C"=7),
     breaks = lc_breaks,
     labels = lab_lc[lc_breaks],
     guide  = guide_legend(
       order = 2,
       nrow = 2, byrow = TRUE,
-      title.position = "top",
-      label.hjust = 0,
-      keywidth  = unit(0.8, "lines"),
-      keyheight = unit(0.8, "lines")
+      title.position = "top"
     )
   ) +
 
   labs(x = "Longitude", y = "Latitude") +
-  theme_minimal(base_size = 8) +
+  theme_minimal(base_size = 9) +
   theme(
     legend.position  = "bottom",
     legend.box       = "vertical",
-    legend.title     = element_text(size = 8, hjust = 0.5),
-    legend.text      = element_text(size = 8),
-    legend.key.size  = unit(0.8, "lines"),
+    legend.title     = element_text(size = 9, hjust = 0.5),
+    legend.text      = element_text(size = 9),
+    legend.key.size  = unit(0.9, "lines"),
     legend.spacing.y = unit(2, "mm")
   ) +
 
-  # Flèche nord
+  # Flèche nord + échelle “traits fins”
   annotation_north_arrow(location = "tl", which_north = "true",
                          style = north_arrow_fancy_orienteering,
                          height = unit(1.2, "cm"), width = unit(1.2, "cm")) +
-
-  # Échelle = trait fin (style "ticks")
   annotation_scale(location = "bl", width_hint = 0.25,
-                   text_cex = 0.7, style = "ticks", line_width = 0.2)
+                   text_cex = 0.8, style = "ticks", line_width = 0.2)
 
 print(p)
 
-## (Optionnel) Exports :
+## 12) (OPTION) EXPORTS ----
 # ggsave("argos_map.png", p, width = 8, height = 9, dpi = 300)
-# utils::write.csv(d_final, "argos_clean.csv", row.names = FALSE, fileEncoding = "UTF-8")
-
+# write.csv(d_final, "argos_clean.csv", row.names = FALSE, fileEncoding = "UTF-8")
