@@ -1,4 +1,3 @@
-
 # ============================================================
 #
 # SCRIPT: ARGOS_CLEANING_AND_MAPPING.R
@@ -296,12 +295,12 @@ p <- ggplot() +
              aes(lon, lat, colour = id, shape = lc), size = 2.2, stroke = 0.2) +
   coord_sf(xlim = xlim_vals, ylim = ylim_vals, expand = FALSE) +
 
-  # Légende 1 (balises) — sans titre, sur 2 lignes
+  # Légende 1 (balises) — sans titre
   scale_colour_manual(
     name   = NULL,
     values = pal_id,
     labels = balise_labels_present,
-    guide  = guide_legend(nrow = 2, byrow = TRUE, order = 1)
+    guide  = guide_legend(nrow = 4, byrow = TRUE, order = 1)  # 4 lignes = 4 balises
   ) +
 
   # Légende 2 (LC) — titre sur sa propre ligne, 2 lignes de symboles
@@ -310,33 +309,28 @@ p <- ggplot() +
     values = c("1"=16, "2"=17, "3"=15, "0"=3, "A"=8, "B"=13, "C"=7),
     breaks = lc_breaks,
     labels = lab_lc[lc_breaks],
-    guide  = guide_legend(
-      order = 2,
-      nrow = 2, byrow = TRUE,
-      title.position = "top"
-    )
+    guide  = guide_legend(order = 2, nrow = 3, byrow = TRUE, title.position = "top")
   ) +
 
   labs(x = "Longitude", y = "Latitude") +
   theme_minimal(base_size = 9) +
   theme(
-    legend.position  = "bottom",
-    legend.box       = "vertical",
-    legend.title     = element_text(size = 9, hjust = 0.5),
-    legend.text      = element_text(size = 9),
+    legend.position  = "right",     # <<< LÉGENDE À DROITE
+    legend.box       = "vertical",  # empile les deux blocs
+    legend.justification = "top",
+    legend.title     = element_text(size = 10, hjust = 0),
+    legend.text      = element_text(size = 10),
     legend.key.size  = unit(0.9, "lines"),
-    legend.spacing.y = unit(2, "mm")
+    legend.spacing.y = unit(2, "mm"),
+    legend.margin    = margin(4, 4, 4, 4, "pt")
   ) +
 
-  # Flèche nord + échelle “traits fins”
   annotation_north_arrow(location = "tl", which_north = "true",
                          style = north_arrow_fancy_orienteering,
                          height = unit(1.2, "cm"), width = unit(1.2, "cm")) +
-  annotation_scale(location = "bl", width_hint = 0.25,
-                   text_cex = 0.8, style = "ticks", line_width = 0.2)
-
+  annotation_scale(location = "br", width_hint = 0.3,
+                 text_cex = 0.7, style = "ticks", line_width = 0.2)
 print(p)
-
 ## 12) (OPTION) EXPORTS ----
 # ggsave("argos_map.png", p, width = 8, height = 9, dpi = 300)
 # write.csv(d_final, "argos_clean.csv", row.names = FALSE, fileEncoding = "UTF-8")
